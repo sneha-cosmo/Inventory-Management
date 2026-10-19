@@ -120,6 +120,8 @@ import EasyTaxFilingPanel from './components/EasyTaxFilingPanel';
 import RoleStaffManagementPanel from './components/RoleStaffManagementPanel';
 import BulkImportModal from './components/BulkImportModal';
 import { DuplicatePolicy } from './utils/bulkImport';
+import BatchImportModal from './components/BatchImportModal';
+import { BatchDuplicatePolicy } from './utils/batchImport';
 
 const INITIAL_BATCHES: Batch[] = [
   {
@@ -656,6 +658,108 @@ export default function App() {
     addAuditLog(actionType, 'InventoryItem', itemReference, description);
   };
 
+  const handleBulkImportBatches = (payload: {
+    batchesToCreate: Batch[];
+    batchesToUpdate: { batch: Batch; addedQuantity: number; oldQuantity: number; newQuantity: number }[];
+    newWarehouses: string[];
+    duplicatePolicy: BatchDuplicatePolicy;
+    fileName: string;
+    counts: {
+      created: number;
+      updated: number;
+      skipped: number;
+      failed: number;
+      totalQuantityAdded: number;
+      expiredCount: number;
+      criticalCount: number;
+      nearExpiryCount: number;
+      healthyCount: number;
+    };
+  }) => {
+    // Business Rule 1: Re-check role inside the import function
+    if (currentUser.role !== 'admin' && currentUser.role !== 'inventory_manager') {
+      alert("Unauthorized: Only Admin and Inventory Manager clearance can execute batch imports.");
+      return;
+    }
+
+    const { batchesToCreate, batchesToUpdate, newWarehouses, duplicatePolicy, fileName, counts } = payload;
+
+    // 1. Create missing warehouses if any were auto-created
+    if (newWarehouses.length > 0) {
+      const createdWhs: Warehouse[] = newWarehouses.map(whName => ({
+        id: `wh-${whName.toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
+        name: whName,
+        location: 'Auto-created Depot'
+      }));
+      setWarehouses(prev => {
+        const existingIds = new Set(prev.map(w => w.id));
+        const toAdd = createdWhs.filter(w => !existingIds.has(w.id));
+        return [...prev, ...toAdd];
+      });
+    }
+
+    // 2. Update existing batches and add new batches
+    const updatedBatchMap = new Map<string, Batch>();
+    batchesToUpdate.forEach(u => updatedBatchMap.set(u.batch.id, u.batch));
+
+    let nextBatches = batches.map(b => updatedBatchMap.get(b.id) || b);
+    nextBatches = [...batchesToCreate, ...nextBatches];
+    setBatches(nextBatches);
+
+    // 3. Step 0 stock rule: Item stock is the sum of its batches.
+    // Increment each item's currentStock by its newly imported batch quantities
+    const itemQuantityIncrements = new Map<string, number>();
+    const warehouseQuantityIncrements = new Map<string, number>(); // `${itemId}__${warehouseId}`
+
+    for (const b of batchesToCreate) {
+      itemQuantityIncrements.set(b.itemId, (itemQuantityIncrements.get(b.itemId) || 0) + b.quantity);
+      const whKey = `${b.itemId}__${b.warehouseId}`;
+      warehouseQuantityIncrements.set(whKey, (warehouseQuantityIncrements.get(whKey) || 0) + b.quantity);
+    }
+
+    for (const u of batchesToUpdate) {
+      itemQuantityIncrements.set(u.batch.itemId, (itemQuantityIncrements.get(u.batch.itemId) || 0) + u.addedQuantity);
+      const whKey = `${u.batch.itemId}__${u.batch.warehouseId}`;
+      warehouseQuantityIncrements.set(whKey, (warehouseQuantityIncrements.get(whKey) || 0) + u.addedQuantity);
+    }
+
+    setInventory(prevInv => prevInv.map(item => {
+      const inc = itemQuantityIncrements.get(item.id);
+      return inc ? { ...item, currentStock: item.currentStock + inc } : item;
+    }));
+
+    // Update warehouse stock levels
+    setStockLevels(prevLevels => {
+      const nextLevels = [...prevLevels];
+      for (const [whKey, inc] of warehouseQuantityIncrements.entries()) {
+        const [itemId, warehouseId] = whKey.split('__');
+        const idx = nextLevels.findIndex(sl => sl.itemId === itemId && sl.warehouseId === warehouseId);
+        if (idx !== -1) {
+          nextLevels[idx] = { ...nextLevels[idx], quantity: nextLevels[idx].quantity + inc };
+        } else {
+          nextLevels.push({ itemId, warehouseId, quantity: inc });
+        }
+      }
+      return nextLevels;
+    });
+
+    // 4. Single consolidated audit entry
+    const actionType = counts.updated > 0 && counts.created === 0 ? 'Update' : 'Create';
+    const updatedDetails = batchesToUpdate.length > 0 
+      ? ` Updated batches: ${batchesToUpdate.map(u => `${u.batch.batchNumber} (${u.oldQuantity} -> ${u.newQuantity})`).join(', ')}.`
+      : '';
+
+    const description = `Bulk batch import executed from ${fileName}: ${counts.created} created, ${counts.updated} updated, ${counts.skipped} skipped, ${counts.failed} failed. Duplicate policy: ${duplicatePolicy}. Total batch quantity loaded: ${counts.totalQuantityAdded} units. Expiry health: ${counts.expiredCount} expired, ${counts.criticalCount} critical, ${counts.nearExpiryCount} near expiry, ${counts.healthyCount} healthy.${updatedDetails}`;
+
+    const itemRef = batchesToCreate.length > 0 
+      ? `BULK-BAT-${batchesToCreate[0].batchNumber}` 
+      : batchesToUpdate.length > 0 
+      ? `BULK-BAT-${batchesToUpdate[0].batch.batchNumber}` 
+      : 'BULK-BATCH';
+
+    addAuditLog(actionType, 'Batch', itemRef, description);
+  };
+
   const handleDeleteItem = (id: string) => {
     const item = inventory.find(i => i.id === id);
     setInventory(inventory.filter(i => i.id !== id));
@@ -1147,6 +1251,7 @@ export default function App() {
                 batches={batches}
                 inventory={inventory}
                 warehouses={warehouses}
+                currentUser={currentUser}
                 checkPermission={checkPermission}
                 onAddBatch={(b) => {
                   setBatches([b, ...batches]);
@@ -1156,6 +1261,7 @@ export default function App() {
                   ));
                   addAuditLog('Add Batch', 'Batch', b.id, `Batch ${b.batchNumber} created with ${b.quantity} ${inventory.find(i => i.id === b.itemId)?.unit} in warehouse.`);
                 }}
+                onBulkImportBatches={handleBulkImportBatches}
                 onRecallBatch={(batchId) => {
                   const targetb = batches.find(b => b.id === batchId);
                   if (!targetb) return;
@@ -2054,16 +2160,31 @@ function AdjustmentPage({ adjustments, inventory, warehouses, onAddAdjustment, l
   );
 }
 
-function BatchPage({ batches, inventory, warehouses, onAddBatch, onRecallBatch, checkPermission, language = 'en' }: {
+function BatchPage({ 
+  batches, 
+  inventory, 
+  warehouses, 
+  currentUser,
+  onAddBatch, 
+  onBulkImportBatches,
+  onRecallBatch, 
+  checkPermission, 
+  language = 'en' 
+}: {
   batches: Batch[],
   inventory: InventoryItem[],
   warehouses: Warehouse[],
+  currentUser: Staff,
   onAddBatch: (b: Batch) => void,
+  onBulkImportBatches: (payload: any) => void,
   onRecallBatch: (id: string) => void,
   checkPermission: (perm: keyof Staff['permissions']) => boolean,
   language?: Language
 }) {
   const [open, setOpen] = useState(false);
+  const [batchImportOpen, setBatchImportOpen] = useState(false);
+  const canImportBatches = currentUser.role === 'admin' || currentUser.role === 'inventory_manager';
+
   const [formData, setFormData] = useState({ 
     itemId: inventory[0]?.id || '', 
     batchNumber: '', 
@@ -2416,7 +2537,38 @@ function BatchPage({ batches, inventory, warehouses, onAddBatch, onRecallBatch, 
             </select>
           </div>
 
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2">
+            {/* Import Batches Button */}
+            {canImportBatches ? (
+              <Button 
+                onClick={() => setBatchImportOpen(true)}
+                variant="outline" 
+                className="border-indigo-200 text-indigo-700 hover:bg-indigo-50 hover:text-indigo-800 rounded-xl font-bold shadow-2xs h-10 px-4"
+              >
+                <UploadCloud className="mr-2 h-4 w-4 text-indigo-600" /> {language === 'ta' ? "தொகுதிகள் இறக்குமதி" : "Import Batches"}
+              </Button>
+            ) : (
+              <div title={language === 'ta' ? "நிர்வாகி மற்றும் சரக்கு மேலாளர் மட்டுமே தொகுதிகளை இறக்குமதி செய்ய முடியும்." : "Only Admin and Inventory Manager can import batches."}>
+                <Button 
+                  variant="outline" 
+                  disabled 
+                  className="rounded-xl border-dashed border-slate-300 text-slate-400 cursor-not-allowed opacity-60 h-10 px-4"
+                >
+                  <UploadCloud className="mr-2 h-4 w-4" /> {language === 'ta' ? "தொகுதிகள் இறக்குமதி" : "Import Batches"}
+                </Button>
+              </div>
+            )}
+
+            <BatchImportModal
+              open={batchImportOpen}
+              onOpenChange={setBatchImportOpen}
+              inventory={inventory}
+              batches={batches}
+              warehouses={warehouses}
+              currentUser={currentUser}
+              language={language}
+              onImportComplete={onBulkImportBatches}
+            />
             
             {/* Add Batch Button */}
             <Dialog open={open} onOpenChange={setOpen}>

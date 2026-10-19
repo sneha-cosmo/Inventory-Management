@@ -40,7 +40,7 @@ The Finder is the most powerful tool for quickly managing your stock.
   - <span style="color:orange">**Low**</span>: Approaching reorder point.
   - <span style="color:green">**Optimal**</span>: Levels are healthy.
 
-### Bulk Import
+### Bulk Import (Items)
 Admins and Inventory Managers can import up to 5,000 inventory items at once using CSV or Excel files.
 - **Access**: Click **Import** next to **Add New Item** on the Item Master page. (Disabled for Billing Clerks and Viewers).
 - **4-Step Wizard**:
@@ -51,6 +51,28 @@ Admins and Inventory Managers can import up to 5,000 inventory items at once usi
      - **Missing Categories/Warehouses**: Toggle auto-creation of missing categories and warehouses.
      - **Import Mode**: "Import valid rows only" or "All or nothing".
   4. **Import & Done**: Asynchronously chunked processing ensures zero UI freezing. Summary reports Created, Updated, Skipped, and Failed counts. Automatically logs a single detailed audit trail entry with opening stock details.
+
+### Batch & Expiry Import
+Register batches, manufacturing dates, and expiration records in bulk for existing inventory items.
+- **Access**: Click **Import Batches** on the Batch Tracking page next to **Assign Batch Lot**.
+- **Template Columns**:
+  - `Batch Number` (required)
+  - `SKU` (required; must link to an existing inventory master item)
+  - `Warehouse` (required)
+  - `Quantity` (required; number > 0)
+  - `Manufacturing Date` (optional; YYYY-MM-DD or DD/MM/YYYY)
+  - `Expiry Date` (required; must be after manufacturing date)
+  - `Batch ID` (optional; system-generated if omitted)
+- **Supported Date Formats**: `YYYY-MM-DD`, `DD/MM/YYYY`, `DD-MM-YYYY` (Indian format; day first), and Excel serial numbers.
+- **Stock Reconciliation Rule**: In this system, item stock is the sum of its batches. Importing batches automatically raises the parent item's stock and warehouse stock allocation by the imported quantity.
+- **Reconciliation Table**: Review tab displays a live per-SKU parity ledger: Current Stock, Existing Batches, Imported Qty, Resulting Batches, and Resulting Stock.
+- **Duplicate Policy**: Skip duplicates (default), Add quantity to existing batch, or Reject whole file.
+- **Expiry Health Badges**:
+  - `Expired`: Expiry in the past ($\le 0$ days; allowed with warning for legacy stock loading)
+  - `Critical`: $\le 7$ days left
+  - `Near Expiry`: 8 to 30 days left
+  - `Healthy`: $> 30$ days left
+- **Audit Trail**: Exactly ONE audit entry created per batch import recording file name, created/updated/skipped/failed counts, duplicate policy, total quantity loaded, and count of expired/critical batches.
 
 ---
 
